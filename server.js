@@ -93,3 +93,75 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Servidor corriendo en puerto ${PORT}`);
 });
+// =============================
+// ASIGNAR RESPONSABLE
+// =============================
+app.put("/requests/:id/assign", async (req, res) => {
+  try {
+    const { assignee_id } = req.body;
+    const { id } = req.params;
+
+    const result = await pool.query(
+      `UPDATE media_requests
+       SET assignee_id = $1,
+           status = 'in_progress',
+           updated_at = now()
+       WHERE id = $2
+       RETURNING *`,
+      [assignee_id, id]
+    );
+
+    res.json(result.rows[0]);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// =============================
+// CAMBIAR ESTADO
+// =============================
+app.put("/requests/:id/status", async (req, res) => {
+  try {
+    const { status } = req.body;
+    const { id } = req.params;
+
+    const result = await pool.query(
+      `UPDATE media_requests
+       SET status = $1,
+           updated_at = now()
+       WHERE id = $2
+       RETURNING *`,
+      [status, id]
+    );
+
+    res.json(result.rows[0]);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// =============================
+// FINALIZAR ENTREGA
+// =============================
+app.put("/requests/:id/finish", async (req, res) => {
+  try {
+    const { finish_link, finish_comment } = req.body;
+    const { id } = req.params;
+
+    const result = await pool.query(
+      `UPDATE media_requests
+       SET status = 'finished',
+           finish_link = $1,
+           finish_comment = $2,
+           finished_at = now(),
+           updated_at = now()
+       WHERE id = $3
+       RETURNING *`,
+      [finish_link, finish_comment, id]
+    );
+
+    res.json(result.rows[0]);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
