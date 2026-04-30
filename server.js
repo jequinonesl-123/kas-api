@@ -82,14 +82,29 @@ app.post("/auth/register", async (req, res) => {
 });
 
 // =====================
-// 🔐 LOGIN
+// 🔐 LOGIN (MEJORADO)
 // =====================
 app.post("/auth/login", async (req, res) => {
   try {
     const { email, password } = req.body;
 
+    if (!email || !password) {
+      return res.status(400).json({ error: "Email y password requeridos" });
+    }
+
     const result = await pool.query(
-      `SELECT * FROM auth_users WHERE email = $1`,
+      `
+      SELECT 
+        au.id,
+        au.email,
+        au.password_hash,
+        p.name,
+        p.username,
+        p.avatar_color
+      FROM auth_users au
+      LEFT JOIN profiles p ON p.auth_user_id = au.id
+      WHERE au.email = $1
+      `,
       [email]
     );
 
@@ -119,13 +134,16 @@ app.post("/auth/login", async (req, res) => {
       user: {
         id: user.id,
         email: user.email,
+        name: user.name,
+        username: user.username,
+        avatar_color: user.avatar_color,
       },
     });
+
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
-
 // =====================
 // 📋 LISTAR REQUESTS
 // =====================
