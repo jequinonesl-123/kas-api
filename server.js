@@ -44,7 +44,7 @@ const authenticateToken = (req, res, next) => {
 // 🏠 ROOT
 // =====================
 app.get("/", (req, res) => {
-  res.send("API KAS funcionando 🚀");
+  res.send("VERSION NUEVA");
 });
 
 // =====================
