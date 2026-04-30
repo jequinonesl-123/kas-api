@@ -1,6 +1,8 @@
 import cors from "cors";
 import express from "express";
 import pkg from "pg";
+import bcrypt from "bcrypt";
+import jwt from "jsonwebtoken";
 
 const { Pool } = pkg;
 
@@ -9,12 +11,38 @@ app.use(express.json());
 app.use(cors());
 
 // =====================
-// 🔌 CONEXIÓN DB
+// 🔐 CONFIG
+// =====================
+const JWT_SECRET = process.env.JWT_SECRET || "super_secret_key";
+
+// =====================
+// 🔌 DB
 // =====================
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false },
 });
+
+// =====================
+// 🔒 MIDDLEWARE AUTH
+// =====================
+const authMiddleware = (req, res, next) => {
+  const auth = req.headers.authorization;
+
+  if (!auth) {
+    return res.status(401).json({ error: "No autorizado" });
+  }
+
+  const token = auth.split(" ")[1];
+
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+    req.user = decoded;
+    next();
+  } catch {
+    res.status(401).json({ error: "Token inválido" });
+  }
+};
 
 // =====================
 // 🏠 ROOT
@@ -36,9 +64,87 @@ app.get("/test-db", async (req, res) => {
 });
 
 // =====================
-// 📋 LISTAR SOLICITUDES
+// 🔐 REGISTER
 // =====================
-app.get("/requests", async (req, res) => {
+app.post("/auth/register", async (req, res) => {
+  try {
+    const { email, password, name, username } = req.body;
+
+    if (!email || !password || !name || !username) {
+      return res.status(400).json({ error: "Faltan campos" });
+    }
+
+    const hashed = await bcrypt.hash(password, 10);
+
+    const authUser = await pool.query(
+      `INSERT INTO auth_users (email, password_hash)
+       VALUES ($1, $2)
+       RETURNING *`,
+      [email, hashed]
+    );
+
+    const profile = await pool.query(
+      `INSERT INTO profiles (id, name, username)
+       VALUES ($1, $2, $3)
+       RETURNING *`,
+      [authUser.rows[0].id, name, username]
+    );
+
+    res.json({
+      user: profile.rows[0],
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// =====================
+// 🔑 LOGIN
+// =====================
+app.post("/auth/login", async (req, res) => {
+  try {
+    const { email, password } = req.body;
+
+    const user = await pool.query(
+      `SELECT * FROM auth_users WHERE email = $1`,
+      [email]
+    );
+
+    if (user.rows.length === 0) {
+      return res.status(400).json({ error: "Usuario no existe" });
+    }
+
+    const valid = await bcrypt.compare(
+      password,
+      user.rows[0].password_hash
+    );
+
+    if (!valid) {
+      return res.status(400).json({ error: "Contraseña incorrecta" });
+    }
+
+    const token = jwt.sign(
+      { user_id: user.rows[0].id },
+      JWT_SECRET,
+      { expiresIn: "7d" }
+    );
+
+    res.json({
+      token,
+      user: {
+        id: user.rows[0].id,
+        email: user.rows[0].email,
+      },
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// =====================
+// 📋 LISTAR REQUESTS
+// =====================
+app.get("/requests", authMiddleware, async (req, res) => {
   try {
     const result = await pool.query(
       `SELECT * FROM media_requests ORDER BY created_at DESC`
@@ -50,14 +156,15 @@ app.get("/requests", async (req, res) => {
 });
 
 // =====================
-// ➕ CREAR SOLICITUD
+// ➕ CREAR REQUEST
 // =====================
-app.post("/requests", async (req, res) => {
+app.post("/requests", authMiddleware, async (req, res) => {
   const client = await pool.connect();
   try {
-    const { title, description, type, due_date, created_by } = req.body;
+    const { title, description, type, due_date } = req.body;
+    const created_by = req.user.user_id;
 
-    if (!title || !type || !due_date || !created_by) {
+    if (!title || !type || !due_date) {
       return res.status(400).json({ error: "Faltan campos obligatorios" });
     }
 
@@ -89,17 +196,14 @@ app.post("/requests", async (req, res) => {
 });
 
 // =====================
-// 🔁 ASIGNAR RESPONSABLE + HISTORIAL
+// 🔁 ASIGNAR
 // =====================
-app.put("/requests/:id/assign", async (req, res) => {
+app.put("/requests/:id/assign", authMiddleware, async (req, res) => {
   const client = await pool.connect();
   try {
-    const { assignee_id, changed_by, reason } = req.body;
+    const { assignee_id, reason } = req.body;
+    const changed_by = req.user.user_id;
     const { id } = req.params;
-
-    if (!assignee_id || !changed_by || !reason) {
-      return res.status(400).json({ error: "Faltan datos obligatorios" });
-    }
 
     await client.query("BEGIN");
 
@@ -147,15 +251,12 @@ app.put("/requests/:id/assign", async (req, res) => {
 // =====================
 // 🔄 CAMBIAR ESTADO
 // =====================
-app.put("/requests/:id/status", async (req, res) => {
+app.put("/requests/:id/status", authMiddleware, async (req, res) => {
   const client = await pool.connect();
   try {
-    const { status, user_id } = req.body;
+    const { status } = req.body;
+    const user_id = req.user.user_id;
     const { id } = req.params;
-
-    if (!status || !user_id) {
-      return res.status(400).json({ error: "Faltan datos" });
-    }
 
     await client.query("BEGIN");
 
@@ -185,12 +286,13 @@ app.put("/requests/:id/status", async (req, res) => {
 });
 
 // =====================
-// 📤 ENVIAR A REVISIÓN
+// 📤 SUBMIT REVIEW
 // =====================
-app.put("/requests/:id/submit-review", async (req, res) => {
+app.put("/requests/:id/submit-review", authMiddleware, async (req, res) => {
   const client = await pool.connect();
   try {
-    const { submitted_by, link, comment } = req.body;
+    const { link, comment } = req.body;
+    const submitted_by = req.user.user_id;
     const { id } = req.params;
 
     await client.query("BEGIN");
@@ -223,12 +325,13 @@ app.put("/requests/:id/submit-review", async (req, res) => {
 });
 
 // =====================
-// ✅ APROBAR / DEVOLVER
+// ✅ DECISIÓN
 // =====================
-app.put("/reviews/:id/decision", async (req, res) => {
+app.put("/reviews/:id/decision", authMiddleware, async (req, res) => {
   const client = await pool.connect();
   try {
-    const { decision, feedback, decided_by } = req.body;
+    const { decision, feedback } = req.body;
+    const decided_by = req.user.user_id;
     const { id } = req.params;
 
     await client.query("BEGIN");
@@ -284,7 +387,7 @@ app.use((err, req, res, next) => {
 });
 
 // =====================
-// 🚀 SERVIDOR
+// 🚀 SERVER
 // =====================
 const PORT = process.env.PORT || 3000;
 
