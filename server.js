@@ -817,3 +817,127 @@ app.delete("/users/:id", async (req, res) => {
     });
   }
 });
+// =============================
+// CREAR USUARIO
+// =============================
+app.post("/users", async (req, res) => {
+  try {
+    const {
+      name,
+      username,
+      email,
+      password,
+      role,
+      avatar_color,
+      active,
+    } = req.body;
+
+    // VALIDACIONES
+    if (!name || !username || !email || !password || !role) {
+      return res.status(400).json({
+        error: "Faltan campos obligatorios",
+      });
+    }
+
+    // VALIDAR EMAIL EXISTENTE
+    const existingEmail = await pool.query(
+      `
+      SELECT id
+      FROM auth_users
+      WHERE email = $1
+    `,
+      [email]
+    );
+
+    if (existingEmail.rows.length > 0) {
+      return res.status(400).json({
+        error: "El email ya existe",
+      });
+    }
+
+    // VALIDAR USERNAME EXISTENTE
+    const existingUsername = await pool.query(
+      `
+      SELECT id
+      FROM profiles
+      WHERE username = $1
+    `,
+      [username]
+    );
+
+    if (existingUsername.rows.length > 0) {
+      return res.status(400).json({
+        error: "El username ya existe",
+      });
+    }
+
+    // ENCRIPTAR PASSWORD
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    // CREAR AUTH USER
+    const authResult = await pool.query(
+      `
+      INSERT INTO auth_users
+      (email, password_hash)
+      VALUES ($1, $2)
+      RETURNING *
+    `,
+      [email, hashedPassword]
+    );
+
+    const authUser = authResult.rows[0];
+
+    // CREAR PROFILE
+    const profileResult = await pool.query(
+      `
+      INSERT INTO profiles
+      (
+        name,
+        username,
+        avatar_color,
+        auth_user_id
+      )
+      VALUES ($1, $2, $3, $4)
+      RETURNING *
+    `,
+      [
+        name,
+        username,
+        avatar_color || "#3B82F6",
+        authUser.id,
+      ]
+    );
+
+    const profile = profileResult.rows[0];
+
+    // CREAR ROLE
+    await pool.query(
+      `
+      INSERT INTO user_roles
+      (
+        user_id,
+        role
+      )
+      VALUES ($1, $2)
+    `,
+      [profile.id, role]
+    );
+
+    res.json({
+      success: true,
+      user: {
+        id: profile.id,
+        name: profile.name,
+        username: profile.username,
+        email,
+        role,
+      },
+    });
+  } catch (error) {
+    console.error(error);
+
+    res.status(500).json({
+      error: error.message,
+    });
+  }
+});
