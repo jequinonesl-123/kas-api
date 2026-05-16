@@ -1,9 +1,9 @@
 import express from "express";
 import cors from "cors";
+import dotenv from "dotenv";
 import pkg from "pg";
 import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
-import dotenv from "dotenv";
 
 dotenv.config();
 
@@ -11,12 +11,17 @@ const { Pool } = pkg;
 
 const app = express();
 
+/* ======================================================
+   MIDDLEWARES
+====================================================== */
+
 app.use(cors());
+
 app.use(express.json());
 
-/* =====================================================
+/* ======================================================
    DATABASE
-===================================================== */
+====================================================== */
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -25,45 +30,63 @@ const pool = new Pool({
   },
 });
 
-/* =====================================================
+/* ======================================================
    TEST
-===================================================== */
+====================================================== */
 
 app.get("/", (req, res) => {
   res.send("VERSION NUEVA");
 });
 
-/* =====================================================
+/* ======================================================
    AUTH MIDDLEWARE
-===================================================== */
+====================================================== */
 
 function authenticateToken(req, res, next) {
-  const authHeader = req.headers["authorization"];
+  try {
+    const authHeader = req.headers.authorization;
 
-  const token = authHeader && authHeader.split(" ")[1];
+    if (!authHeader) {
+      return res.status(401).json({
+        error: "Token requerido",
+      });
+    }
 
-  if (!token) {
-    return res.status(401).json({
-      error: "Token requerido",
-    });
-  }
+    const token = authHeader.split(" ")[1];
 
-  jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
-    if (err) {
-      return res.status(403).json({
+    if (!token) {
+      return res.status(401).json({
         error: "Token inválido",
       });
     }
 
-    req.user = user;
+    jwt.verify(
+      token,
+      process.env.JWT_SECRET,
+      (err, decoded) => {
+        if (err) {
+          return res.status(403).json({
+            error: "Token expirado o inválido",
+          });
+        }
 
-    next();
-  });
+        req.user = decoded;
+
+        next();
+      }
+    );
+  } catch (error) {
+    console.error("AUTH ERROR:", error);
+
+    return res.status(500).json({
+      error: error.message,
+    });
+  }
 }
 
-/* =====================================================
+/* ======================================================
    REGISTER
-===================================================== */
+====================================================== */
 
 app.post("/auth/register", async (req, res) => {
   try {
@@ -78,17 +101,21 @@ app.post("/auth/register", async (req, res) => {
 
     if (!email || !password) {
       return res.status(400).json({
-        error: "Email y contraseña son requeridos",
+        error: "Email y password son requeridos",
       });
     }
 
-    // verificar si ya existe
-    const existingUser = await pool.query(
-      `SELECT * FROM auth_users WHERE email = $1`,
+    // validar existente
+    const existing = await pool.query(
+      `
+      SELECT *
+      FROM auth_users
+      WHERE email = $1
+      `,
       [email]
     );
 
-    if (existingUser.rows.length > 0) {
+    if (existing.rows.length > 0) {
       return res.status(400).json({
         error: "El usuario ya existe",
       });
@@ -97,7 +124,7 @@ app.post("/auth/register", async (req, res) => {
     // hash password
     const passwordHash = await bcrypt.hash(password, 10);
 
-    // crear usuario auth
+    // crear auth user
     const authResult = await pool.query(
       `
       INSERT INTO auth_users (
@@ -105,7 +132,11 @@ app.post("/auth/register", async (req, res) => {
         password_hash,
         created_at
       )
-      VALUES ($1, $2, NOW())
+      VALUES (
+        $1,
+        $2,
+        NOW()
+      )
       RETURNING *
       `,
       [email, passwordHash]
@@ -113,7 +144,7 @@ app.post("/auth/register", async (req, res) => {
 
     const authUser = authResult.rows[0];
 
-    // crear perfil
+    // crear profile
     const profileResult = await pool.query(
       `
       INSERT INTO profiles (
@@ -148,7 +179,7 @@ app.post("/auth/register", async (req, res) => {
     );
 
     res.status(201).json({
-      message: "Usuario creado correctamente",
+      success: true,
       auth_user: authUser,
       profile: profileResult.rows[0],
     });
@@ -161,9 +192,9 @@ app.post("/auth/register", async (req, res) => {
   }
 });
 
-/* =====================================================
+/* ======================================================
    LOGIN
-===================================================== */
+====================================================== */
 
 app.post("/auth/login", async (req, res) => {
   try {
@@ -238,9 +269,9 @@ app.post("/auth/login", async (req, res) => {
   }
 });
 
-/* =====================================================
-   ME
-===================================================== */
+/* ======================================================
+   CURRENT USER
+====================================================== */
 
 app.get("/me", authenticateToken, async (req, res) => {
   try {
@@ -277,9 +308,9 @@ app.get("/me", authenticateToken, async (req, res) => {
   }
 });
 
-/* =====================================================
+/* ======================================================
    USERS
-===================================================== */
+====================================================== */
 
 app.get("/users", authenticateToken, async (req, res) => {
   try {
@@ -290,6 +321,7 @@ app.get("/users", authenticateToken, async (req, res) => {
         p.username,
         p.role,
         p.avatar_color,
+        p.auth_user_id,
         au.email
       FROM profiles p
       LEFT JOIN auth_users au
@@ -307,9 +339,9 @@ app.get("/users", authenticateToken, async (req, res) => {
   }
 });
 
-/* =====================================================
+/* ======================================================
    CREATE REQUEST
-===================================================== */
+====================================================== */
 
 app.post("/requests", authenticateToken, async (req, res) => {
   try {
@@ -327,7 +359,6 @@ app.post("/requests", authenticateToken, async (req, res) => {
       assigned_to ||
       null;
 
-    // validaciones
     if (!title || !description || !type) {
       return res.status(400).json({
         error: "Faltan campos requeridos",
@@ -371,9 +402,11 @@ app.post("/requests", authenticateToken, async (req, res) => {
     );
 
     res.status(201).json(result.rows[0]);
-
   } catch (error) {
-    console.error("ERROR CREANDO REQUEST:", error);
+    console.error(
+      "ERROR CREANDO REQUEST:",
+      error
+    );
 
     res.status(500).json({
       error: error.message,
@@ -381,9 +414,9 @@ app.post("/requests", authenticateToken, async (req, res) => {
   }
 });
 
-/* =====================================================
+/* ======================================================
    GET REQUESTS
-===================================================== */
+====================================================== */
 
 app.get("/requests", authenticateToken, async (req, res) => {
   try {
@@ -403,9 +436,9 @@ app.get("/requests", authenticateToken, async (req, res) => {
   }
 });
 
-/* =====================================================
+/* ======================================================
    ASSIGN REQUEST
-===================================================== */
+====================================================== */
 
 app.put(
   "/requests/:id/assign",
@@ -423,7 +456,10 @@ app.put(
         WHERE id = $2
         RETURNING *
         `,
-        [assignee_id, req.params.id]
+        [
+          assignee_id,
+          req.params.id,
+        ]
       );
 
       res.json(result.rows[0]);
@@ -437,9 +473,9 @@ app.put(
   }
 );
 
-/* =====================================================
+/* ======================================================
    UPDATE STATUS
-===================================================== */
+====================================================== */
 
 app.put(
   "/requests/:id/status",
@@ -447,6 +483,20 @@ app.put(
   async (req, res) => {
     try {
       const { status } = req.body;
+
+      const validStatuses = [
+        "pending",
+        "in_progress",
+        "in_review",
+        "changes_requested",
+        "finished",
+      ];
+
+      if (!validStatuses.includes(status)) {
+        return res.status(400).json({
+          error: "Estado inválido",
+        });
+      }
 
       const result = await pool.query(
         `
@@ -457,7 +507,10 @@ app.put(
         WHERE id = $2
         RETURNING *
         `,
-        [status, req.params.id]
+        [
+          status,
+          req.params.id,
+        ]
       );
 
       res.json(result.rows[0]);
@@ -471,9 +524,9 @@ app.put(
   }
 );
 
-/* =====================================================
+/* ======================================================
    FINISH REQUEST
-===================================================== */
+====================================================== */
 
 app.put(
   "/requests/:id/finish",
@@ -515,9 +568,9 @@ app.put(
   }
 );
 
-/* =====================================================
+/* ======================================================
    DELETE USER
-===================================================== */
+====================================================== */
 
 app.delete(
   "/users/:id",
@@ -539,7 +592,8 @@ app.delete(
         });
       }
 
-      const profile = profileResult.rows[0];
+      const profile =
+        profileResult.rows[0];
 
       // eliminar profile
       await pool.query(
@@ -550,7 +604,7 @@ app.delete(
         [req.params.id]
       );
 
-      // eliminar auth user
+      // eliminar auth
       if (profile.auth_user_id) {
         await pool.query(
           `
@@ -565,7 +619,10 @@ app.delete(
         success: true,
       });
     } catch (error) {
-      console.error("DELETE USER ERROR:", error);
+      console.error(
+        "DELETE USER ERROR:",
+        error
+      );
 
       res.status(500).json({
         error: error.message,
@@ -574,9 +631,9 @@ app.delete(
   }
 );
 
-/* =====================================================
+/* ======================================================
    CHANGE PASSWORD
-===================================================== */
+====================================================== */
 
 app.put(
   "/users/:id/password",
@@ -587,7 +644,7 @@ app.put(
 
       if (!password) {
         return res.status(400).json({
-          error: "Contraseña requerida",
+          error: "Password requerido",
         });
       }
 
@@ -606,9 +663,13 @@ app.put(
         });
       }
 
-      const profile = profileResult.rows[0];
+      const profile =
+        profileResult.rows[0];
 
-      const hash = await bcrypt.hash(password, 10);
+      const hash = await bcrypt.hash(
+        password,
+        10
+      );
 
       await pool.query(
         `
@@ -616,14 +677,20 @@ app.put(
         SET password_hash = $1
         WHERE id = $2
         `,
-        [hash, profile.auth_user_id]
+        [
+          hash,
+          profile.auth_user_id,
+        ]
       );
 
       res.json({
         success: true,
       });
     } catch (error) {
-      console.error("CHANGE PASSWORD ERROR:", error);
+      console.error(
+        "CHANGE PASSWORD ERROR:",
+        error
+      );
 
       res.status(500).json({
         error: error.message,
@@ -632,12 +699,14 @@ app.put(
   }
 );
 
-/* =====================================================
-   START SERVER
-===================================================== */
+/* ======================================================
+   SERVER
+====================================================== */
 
 const PORT = process.env.PORT || 10000;
 
 app.listen(PORT, () => {
-  console.log(`Servidor corriendo en puerto ${PORT}`);
+  console.log(
+    `Servidor corriendo en puerto ${PORT}`
+  );
 });
