@@ -572,3 +572,248 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Servidor corriendo en puerto ${PORT}`);
 });
+// =============================
+// LISTAR USUARIOS
+// =============================
+app.get("/users", async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT
+        p.id,
+        p.name,
+        p.username,
+        p.avatar_color,
+        p.created_at,
+        p.updated_at,
+        au.email,
+        ur.role
+      FROM profiles p
+      LEFT JOIN auth_users au
+        ON p.auth_user_id = au.id
+      LEFT JOIN user_roles ur
+        ON ur.user_id = p.id
+      ORDER BY p.created_at DESC
+    `);
+
+    res.json(result.rows);
+  } catch (error) {
+    res.status(500).json({
+      error: error.message,
+    });
+  }
+});
+
+// =============================
+// OBTENER USUARIO POR ID
+// =============================
+app.get("/users/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const result = await pool.query(
+      `
+      SELECT
+        p.id,
+        p.name,
+        p.username,
+        p.avatar_color,
+        p.created_at,
+        p.updated_at,
+        au.email,
+        ur.role
+      FROM profiles p
+      LEFT JOIN auth_users au
+        ON p.auth_user_id = au.id
+      LEFT JOIN user_roles ur
+        ON ur.user_id = p.id
+      WHERE p.id = $1
+    `,
+      [id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        error: "Usuario no encontrado",
+      });
+    }
+
+    res.json(result.rows[0]);
+  } catch (error) {
+    res.status(500).json({
+      error: error.message,
+    });
+  }
+});
+
+// =============================
+// ACTUALIZAR USUARIO
+// =============================
+app.put("/users/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const {
+      name,
+      username,
+      email,
+      role,
+      avatar_color,
+    } = req.body;
+
+    const profileResult = await pool.query(
+      `
+      UPDATE profiles
+      SET
+        name = $1,
+        username = $2,
+        avatar_color = $3,
+        updated_at = now()
+      WHERE id = $4
+      RETURNING *
+    `,
+      [name, username, avatar_color, id]
+    );
+
+    if (profileResult.rows.length === 0) {
+      return res.status(404).json({
+        error: "Usuario no encontrado",
+      });
+    }
+
+    const profile = profileResult.rows[0];
+
+    await pool.query(
+      `
+      UPDATE auth_users
+      SET email = $1
+      WHERE id = $2
+    `,
+      [email, profile.auth_user_id]
+    );
+
+    await pool.query(
+      `
+      UPDATE user_roles
+      SET role = $1
+      WHERE user_id = $2
+    `,
+      [role, id]
+    );
+
+    res.json({
+      success: true,
+    });
+  } catch (error) {
+    res.status(500).json({
+      error: error.message,
+    });
+  }
+});
+
+// =============================
+// CAMBIAR CONTRASEÑA
+// =============================
+app.put("/users/:id/password", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { password } = req.body;
+
+    const profileResult = await pool.query(
+      `
+      SELECT auth_user_id
+      FROM profiles
+      WHERE id = $1
+    `,
+      [id]
+    );
+
+    if (profileResult.rows.length === 0) {
+      return res.status(404).json({
+        error: "Usuario no encontrado",
+      });
+    }
+
+    const authUserId = profileResult.rows[0].auth_user_id;
+
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    await pool.query(
+      `
+      UPDATE auth_users
+      SET password_hash = $1
+      WHERE id = $2
+    `,
+      [hashedPassword, authUserId]
+    );
+
+    res.json({
+      success: true,
+    });
+  } catch (error) {
+    res.status(500).json({
+      error: error.message,
+    });
+  }
+});
+
+// =============================
+// ELIMINAR USUARIO
+// =============================
+app.delete("/users/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // buscar auth_user_id
+    const profileResult = await pool.query(
+      `
+      SELECT auth_user_id
+      FROM profiles
+      WHERE id = $1
+    `,
+      [id]
+    );
+
+    if (profileResult.rows.length === 0) {
+      return res.status(404).json({
+        error: "Usuario no encontrado",
+      });
+    }
+
+    const authUserId = profileResult.rows[0].auth_user_id;
+
+    // eliminar role
+    await pool.query(
+      `
+      DELETE FROM user_roles
+      WHERE user_id = $1
+    `,
+      [id]
+    );
+
+    // eliminar profile
+    await pool.query(
+      `
+      DELETE FROM profiles
+      WHERE id = $1
+    `,
+      [id]
+    );
+
+    // eliminar auth
+    await pool.query(
+      `
+      DELETE FROM auth_users
+      WHERE id = $1
+    `,
+      [authUserId]
+    );
+
+    res.json({
+      success: true,
+    });
+  } catch (error) {
+    res.status(500).json({
+      error: error.message,
+    });
+  }
+});
