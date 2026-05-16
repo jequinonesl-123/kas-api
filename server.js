@@ -660,6 +660,18 @@ app.post("/requests", authenticateToken, async (req, res) => {
       assignee_id,
     } = req.body;
 
+    // =====================
+    // VALIDAR CAMPOS
+    // =====================
+    if (!title || !type || !due_date) {
+      return res.status(400).json({
+        error: "Campos obligatorios faltantes",
+      });
+    }
+
+    // =====================
+    // VALIDAR TIPOS
+    // =====================
     const allowedTypes = [
       "image",
       "video",
@@ -677,12 +689,30 @@ app.post("/requests", authenticateToken, async (req, res) => {
       });
     }
 
-    if (!title || !type || !due_date) {
-      return res.status(400).json({
-        error: "Campos obligatorios faltantes",
+    // =====================
+    // OBTENER PROFILE ID
+    // =====================
+    const profileResult = await pool.query(
+      `
+      SELECT id
+      FROM profiles
+      WHERE auth_user_id = $1
+      `,
+      [req.user.userId]
+    );
+
+    if (profileResult.rows.length === 0) {
+      return res.status(404).json({
+        error: "Perfil del usuario no encontrado",
       });
     }
 
+    // ESTE ES EL ID CORRECTO
+    const profileId = profileResult.rows[0].id;
+
+    // =====================
+    // INSERT REQUEST
+    // =====================
     const result = await pool.query(
       `
       INSERT INTO media_requests (
@@ -711,10 +741,10 @@ app.post("/requests", authenticateToken, async (req, res) => {
       `,
       [
         title,
-        description,
+        description || "",
         type,
         due_date,
-        req.user.userId,
+        profileId, // ✅ ESTE ERA EL ERROR
         assignee_id || null,
       ]
     );
