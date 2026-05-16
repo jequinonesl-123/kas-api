@@ -1,9 +1,9 @@
 import express from "express";
-import pkg from "pg";
 import cors from "cors";
+import pkg from "pg";
+import dotenv from "dotenv";
 import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
-import dotenv from "dotenv";
 
 dotenv.config();
 
@@ -11,15 +11,13 @@ const { Pool } = pkg;
 
 const app = express();
 
-// ======================================================
-// 🔧 MIDDLEWARES
-// ======================================================
 app.use(cors());
 app.use(express.json());
 
 // ======================================================
-// 🔌 DATABASE
+// DATABASE
 // ======================================================
+
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: {
@@ -28,200 +26,145 @@ const pool = new Pool({
 });
 
 // ======================================================
-// 🔐 AUTH MIDDLEWARE
+// TEST
 // ======================================================
-const authenticateToken = (req, res, next) => {
-  try {
 
-    const authHeader = req.headers["authorization"];
-
-    if (!authHeader) {
-      return res.status(401).json({
-        error: "Token requerido",
-      });
-    }
-
-    const token = authHeader.split(" ")[1];
-
-    if (!token) {
-      return res.status(401).json({
-        error: "Token inválido",
-      });
-    }
-
-    jwt.verify(token, process.env.JWT_SECRET, (err, decoded) => {
-
-      if (err) {
-        return res.status(403).json({
-          error: "Token expirado o inválido",
-        });
-      }
-
-      req.user = decoded;
-
-      next();
-    });
-
-  } catch (error) {
-
-    return res.status(500).json({
-      error: error.message,
-    });
-  }
-};
-
-// ======================================================
-// 🏠 ROOT
-// ======================================================
 app.get("/", (req, res) => {
-  res.send("KAS API FUNCIONANDO 🚀");
+  res.send("VERSION NUEVA");
 });
 
 // ======================================================
-// 🧪 DEBUG
+// DEBUG
 // ======================================================
-app.get("/debug", (req, res) => {
-  res.json({
-    message: "DEBUG OK",
-    env: {
-      hasDatabaseUrl: !!process.env.DATABASE_URL,
-      hasJwtSecret: !!process.env.JWT_SECRET,
-    },
-  });
-});
 
-// ======================================================
-// 🧪 TEST DB
-// ======================================================
-app.get("/test-db", async (req, res) => {
+app.get("/debug", async (req, res) => {
   try {
 
-    const result = await pool.query("SELECT NOW()");
+    const users = await pool.query(`
+      SELECT
+        p.id,
+        p.name,
+        p.username,
+        p.avatar_color,
+        p.auth_user_id,
+        a.email
+      FROM profiles p
+      LEFT JOIN auth_users a
+      ON p.auth_user_id = a.id
+    `);
 
-    res.json({
-      success: true,
-      database_time: result.rows[0],
-    });
+    res.json(users.rows);
 
   } catch (error) {
 
     res.status(500).json({
-      success: false,
       error: error.message,
     });
+
   }
 });
 
 // ======================================================
-// 🔐 REGISTER
+// AUTH MIDDLEWARE
 // ======================================================
+
+function authenticateToken(req, res, next) {
+
+  const authHeader = req.headers["authorization"];
+
+  const token = authHeader && authHeader.split(" ")[1];
+
+  if (!token) {
+
+    return res.status(401).json({
+      error: "Token requerido",
+    });
+
+  }
+
+  jwt.verify(
+    token,
+    process.env.JWT_SECRET,
+    (err, user) => {
+
+      if (err) {
+
+        return res.status(403).json({
+          error: "Token inválido",
+        });
+
+      }
+
+      req.user = user;
+
+      next();
+    }
+  );
+}
+
+// ======================================================
+// REGISTER
+// ======================================================
+
 app.post("/auth/register", async (req, res) => {
+
   try {
 
-    const { email, password } = req.body;
+    const {
+      email,
+      password,
+    } = req.body;
 
     if (!email || !password) {
+
       return res.status(400).json({
-        error: "Email y password requeridos",
+        error: "Email y contraseña requeridos",
       });
+
     }
 
-    // VALIDAR EXISTENTE
-    const existingUser = await pool.query(
+    // VALIDAR DUPLICADO
+    const existing = await pool.query(
       `
-      SELECT id
-      FROM auth_users
+      SELECT * FROM auth_users
       WHERE email = $1
       `,
       [email]
     );
 
-    if (existingUser.rows.length > 0) {
+    if (existing.rows.length > 0) {
+
       return res.status(400).json({
         error: "El usuario ya existe",
       });
+
     }
 
     // HASH PASSWORD
-    const hashedPassword = await bcrypt.hash(password, 10);
+    const password_hash = await bcrypt.hash(password, 10);
 
-    // CREAR AUTH USER
-    const authResult = await pool.query(
+    // INSERT USER
+    const result = await pool.query(
       `
       INSERT INTO auth_users (
         email,
-        password_hash
-      )
-      VALUES ($1, $2)
-      RETURNING *
-      `,
-      [email, hashedPassword]
-    );
-
-    const authUser = authResult.rows[0];
-
-    // CREAR PROFILE
-    const profileResult = await pool.query(
-      `
-      INSERT INTO profiles (
-        name,
-        username,
-        avatar_color,
-        auth_user_id
+        password_hash,
+        created_at
       )
       VALUES (
         $1,
         $2,
-        '#0096FA',
-        $3
+        NOW()
       )
-      RETURNING *
+      RETURNING id, email
       `,
       [
-        email.split("@")[0],
-        email.split("@")[0],
-        authUser.id,
+        email,
+        password_hash,
       ]
     );
 
-    const profile = profileResult.rows[0];
-
-    // CREAR ROLE
-    await pool.query(
-      `
-      INSERT INTO user_roles (
-        id,
-        user_id,
-        role
-      )
-      VALUES (
-        gen_random_uuid(),
-        $1,
-        'designer'
-      )
-      `,
-      [profile.id]
-    );
-
-    // TOKEN
-    const token = jwt.sign(
-      {
-        userId: authUser.id,
-      },
-      process.env.JWT_SECRET,
-      {
-        expiresIn: "1d",
-      }
-    );
-
-    res.json({
-      success: true,
-      token,
-      user: {
-        id: authUser.id,
-        email: authUser.email,
-      },
-    });
+    res.json(result.rows[0]);
 
   } catch (error) {
 
@@ -230,66 +173,67 @@ app.post("/auth/register", async (req, res) => {
     res.status(500).json({
       error: error.message,
     });
+
   }
+
 });
 
 // ======================================================
-// 🔐 LOGIN
+// LOGIN
 // ======================================================
+
 app.post("/auth/login", async (req, res) => {
+
   try {
 
-    const { email, password } = req.body;
+    const {
+      email,
+      password,
+    } = req.body;
 
-    if (!email || !password) {
-      return res.status(400).json({
-        error: "Email y password requeridos",
-      });
-    }
-
-    // BUSCAR USUARIO
     const result = await pool.query(
       `
       SELECT
-        au.id,
-        au.email,
-        au.password_hash,
-        p.id AS profile_id,
+        a.id,
+        a.email,
+        a.password_hash,
         p.name,
         p.username,
         p.avatar_color,
-        ur.role
-      FROM auth_users au
+        r.role
+      FROM auth_users a
       LEFT JOIN profiles p
-        ON p.auth_user_id = au.id
-      LEFT JOIN user_roles ur
-        ON ur.user_id = p.id
-      WHERE au.email = $1
+        ON p.auth_user_id = a.id
+      LEFT JOIN user_roles r
+        ON r.user_id = p.id
+      WHERE a.email = $1
       `,
       [email]
     );
 
     if (result.rows.length === 0) {
+
       return res.status(401).json({
         error: "Usuario no encontrado",
       });
+
     }
 
     const user = result.rows[0];
 
-    // VALIDAR PASSWORD
     const validPassword = await bcrypt.compare(
       password,
       user.password_hash
     );
 
     if (!validPassword) {
+
       return res.status(401).json({
         error: "Contraseña incorrecta",
       });
+
     }
 
-    // TOKEN
     const token = jwt.sign(
       {
         userId: user.id,
@@ -301,16 +245,14 @@ app.post("/auth/login", async (req, res) => {
     );
 
     res.json({
-      success: true,
       token,
       user: {
         id: user.id,
-        profile_id: user.profile_id,
         email: user.email,
         name: user.name,
         username: user.username,
         avatar_color: user.avatar_color,
-        role: user.role,
+        role: user.role || "editor",
       },
     });
 
@@ -321,114 +263,44 @@ app.post("/auth/login", async (req, res) => {
     res.status(500).json({
       error: error.message,
     });
+
   }
+
 });
 
 // ======================================================
-// 👤 CURRENT USER
+// ME
 // ======================================================
+
 app.get("/me", authenticateToken, async (req, res) => {
+
   try {
 
     const result = await pool.query(
       `
       SELECT
-        au.id,
-        au.email,
-        p.id AS profile_id,
+        a.id,
+        a.email,
         p.name,
         p.username,
         p.avatar_color,
-        ur.role
-      FROM auth_users au
+        r.role
+      FROM auth_users a
       LEFT JOIN profiles p
-        ON p.auth_user_id = au.id
-      LEFT JOIN user_roles ur
-        ON ur.user_id = p.id
-      WHERE au.id = $1
+        ON p.auth_user_id = a.id
+      LEFT JOIN user_roles r
+        ON r.user_id = p.id
+      WHERE a.id = $1
       `,
       [req.user.userId]
     );
 
-    res.json(result.rows[0]);
-
-  } catch (error) {
-
-    res.status(500).json({
-      error: error.message,
-    });
-  }
-});
-
-// ======================================================
-// 👥 LISTAR USUARIOS
-// ======================================================
-app.get("/users", authenticateToken, async (req, res) => {
-  try {
-
-    const result = await pool.query(`
-      SELECT
-        p.id,
-        p.name,
-        p.username,
-        p.avatar_color,
-        p.auth_user_id,
-        p.created_at,
-        p.updated_at,
-        au.email,
-        ur.role
-      FROM profiles p
-      LEFT JOIN auth_users au
-        ON au.id = p.auth_user_id
-      LEFT JOIN user_roles ur
-        ON ur.user_id = p.id
-      ORDER BY p.created_at DESC
-    `);
-
-    res.json(result.rows);
-
-  } catch (error) {
-
-    res.status(500).json({
-      error: error.message,
-    });
-  }
-});
-
-// ======================================================
-// 👤 OBTENER USUARIO
-// ======================================================
-app.get("/users/:id", authenticateToken, async (req, res) => {
-  try {
-
-    const { id } = req.params;
-
-    const result = await pool.query(
-      `
-      SELECT
-        p.id,
-        p.name,
-        p.username,
-        p.avatar_color,
-        p.auth_user_id,
-        p.created_at,
-        p.updated_at,
-        au.email,
-        ur.role
-      FROM profiles p
-      LEFT JOIN auth_users au
-        ON au.id = p.auth_user_id
-      LEFT JOIN user_roles ur
-        ON ur.user_id = p.id
-      WHERE p.id = $1
-      `,
-      [id]
-    );
-
     if (result.rows.length === 0) {
+
       return res.status(404).json({
         error: "Usuario no encontrado",
       });
+
     }
 
     res.json(result.rows[0]);
@@ -438,13 +310,56 @@ app.get("/users/:id", authenticateToken, async (req, res) => {
     res.status(500).json({
       error: error.message,
     });
+
   }
+
 });
 
 // ======================================================
-// ➕ CREAR USUARIO
+// USERS
 // ======================================================
+
+app.get("/users", authenticateToken, async (req, res) => {
+
+  try {
+
+    const result = await pool.query(`
+      SELECT
+        p.id,
+        p.name,
+        p.username,
+        p.avatar_color,
+        p.created_at,
+        a.email,
+        r.role
+      FROM profiles p
+      LEFT JOIN auth_users a
+        ON p.auth_user_id = a.id
+      LEFT JOIN user_roles r
+        ON r.user_id = p.id
+      ORDER BY p.created_at ASC
+    `);
+
+    res.json(result.rows);
+
+  } catch (error) {
+
+    console.error(error);
+
+    res.status(500).json({
+      error: error.message,
+    });
+
+  }
+
+});
+
+// ======================================================
+// CREATE USER
+// ======================================================
+
 app.post("/users", authenticateToken, async (req, res) => {
+
   try {
 
     const {
@@ -456,72 +371,93 @@ app.post("/users", authenticateToken, async (req, res) => {
       avatar_color,
     } = req.body;
 
-    if (!name || !username || !email || !password || !role) {
+    if (!name || !username || !email || !password) {
+
       return res.status(400).json({
-        error: "Faltan campos obligatorios",
+        error: "Campos obligatorios faltantes",
       });
+
     }
 
-    // VALIDAR EMAIL
+    // EMAIL EXISTE
     const existingEmail = await pool.query(
       `
-      SELECT id
-      FROM auth_users
+      SELECT * FROM auth_users
       WHERE email = $1
       `,
       [email]
     );
 
     if (existingEmail.rows.length > 0) {
+
       return res.status(400).json({
-        error: "El email ya existe",
+        error: "Email ya existe",
       });
+
     }
 
-    // VALIDAR USERNAME
+    // USERNAME EXISTE
     const existingUsername = await pool.query(
       `
-      SELECT id
-      FROM profiles
+      SELECT * FROM profiles
       WHERE username = $1
       `,
       [username]
     );
 
     if (existingUsername.rows.length > 0) {
+
       return res.status(400).json({
-        error: "El username ya existe",
+        error: "Username ya existe",
       });
+
     }
 
-    // HASH PASSWORD
-    const hashedPassword = await bcrypt.hash(password, 10);
+    // HASH
+    const password_hash = await bcrypt.hash(password, 10);
 
-    // CREAR AUTH USER
+    // AUTH USER
     const authResult = await pool.query(
       `
       INSERT INTO auth_users (
         email,
-        password_hash
+        password_hash,
+        created_at
       )
-      VALUES ($1, $2)
+      VALUES (
+        $1,
+        $2,
+        NOW()
+      )
       RETURNING *
       `,
-      [email, hashedPassword]
+      [
+        email,
+        password_hash,
+      ]
     );
 
     const authUser = authResult.rows[0];
 
-    // CREAR PROFILE
+    // PROFILE
     const profileResult = await pool.query(
       `
       INSERT INTO profiles (
         name,
         username,
         avatar_color,
-        auth_user_id
+        auth_user_id,
+        created_at,
+        updated_at
       )
-      VALUES ($1, $2, $3, $4)
+      VALUES (
+        $1,
+        $2,
+        $3,
+        $4,
+        NOW(),
+        NOW()
+      )
       RETURNING *
       `,
       [
@@ -534,32 +470,27 @@ app.post("/users", authenticateToken, async (req, res) => {
 
     const profile = profileResult.rows[0];
 
-    // CREAR ROLE
+    // ROLE
     await pool.query(
       `
       INSERT INTO user_roles (
-        id,
         user_id,
         role
       )
       VALUES (
-        gen_random_uuid(),
         $1,
         $2
       )
       `,
-      [profile.id, role]
+      [
+        profile.id,
+        role || "editor",
+      ]
     );
 
     res.json({
       success: true,
-      user: {
-        id: profile.id,
-        name: profile.name,
-        username: profile.username,
-        email,
-        role,
-      },
+      user: profile,
     });
 
   } catch (error) {
@@ -569,178 +500,40 @@ app.post("/users", authenticateToken, async (req, res) => {
     res.status(500).json({
       error: error.message,
     });
+
   }
+
 });
 
 // ======================================================
-// ✏️ ACTUALIZAR USUARIO
+// DELETE USER
 // ======================================================
-app.put("/users/:id", authenticateToken, async (req, res) => {
+
+app.delete("/users/:id", authenticateToken, async (req, res) => {
+
   try {
 
     const { id } = req.params;
 
-    const {
-      name,
-      username,
-      email,
-      role,
-      avatar_color,
-    } = req.body;
-
+    // PROFILE
     const profileResult = await pool.query(
       `
-      UPDATE profiles
-      SET
-        name = $1,
-        username = $2,
-        avatar_color = $3,
-        updated_at = NOW()
-      WHERE id = $4
-      RETURNING *
+      SELECT *
+      FROM profiles
+      WHERE id = $1
       `,
-      [
-        name,
-        username,
-        avatar_color,
-        id,
-      ]
+      [id]
     );
 
     if (profileResult.rows.length === 0) {
+
       return res.status(404).json({
         error: "Usuario no encontrado",
       });
+
     }
 
     const profile = profileResult.rows[0];
-
-    // UPDATE EMAIL
-    await pool.query(
-      `
-      UPDATE auth_users
-      SET email = $1
-      WHERE id = $2
-      `,
-      [
-        email,
-        profile.auth_user_id,
-      ]
-    );
-
-    // UPDATE ROLE
-    await pool.query(
-      `
-      UPDATE user_roles
-      SET role = $1
-      WHERE user_id = $2
-      `,
-      [
-        role,
-        id,
-      ]
-    );
-
-    res.json({
-      success: true,
-    });
-
-  } catch (error) {
-
-    console.error(error);
-
-    res.status(500).json({
-      error: error.message,
-    });
-  }
-});
-
-// ======================================================
-// 🔐 CAMBIAR PASSWORD
-// ======================================================
-app.put("/users/:id/password", authenticateToken, async (req, res) => {
-  try {
-
-    const { id } = req.params;
-    const { password } = req.body;
-
-    if (!password) {
-      return res.status(400).json({
-        error: "Password requerido",
-      });
-    }
-
-    const profileResult = await pool.query(
-      `
-      SELECT auth_user_id
-      FROM profiles
-      WHERE id = $1
-      `,
-      [id]
-    );
-
-    if (profileResult.rows.length === 0) {
-      return res.status(404).json({
-        error: "Usuario no encontrado",
-      });
-    }
-
-    const authUserId = profileResult.rows[0].auth_user_id;
-
-    // HASH PASSWORD
-    const hashedPassword = await bcrypt.hash(password, 10);
-
-    // UPDATE PASSWORD
-    await pool.query(
-      `
-      UPDATE auth_users
-      SET password_hash = $1
-      WHERE id = $2
-      `,
-      [
-        hashedPassword,
-        authUserId,
-      ]
-    );
-
-    res.json({
-      success: true,
-    });
-
-  } catch (error) {
-
-    console.error(error);
-
-    res.status(500).json({
-      error: error.message,
-    });
-  }
-});
-
-// ======================================================
-// ❌ ELIMINAR USUARIO
-// ======================================================
-app.delete("/users/:id", authenticateToken, async (req, res) => {
-  try {
-
-    const { id } = req.params;
-
-    const profileResult = await pool.query(
-      `
-      SELECT auth_user_id
-      FROM profiles
-      WHERE id = $1
-      `,
-      [id]
-    );
-
-    if (profileResult.rows.length === 0) {
-      return res.status(404).json({
-        error: "Usuario no encontrado",
-      });
-    }
-
-    const authUserId = profileResult.rows[0].auth_user_id;
 
     // DELETE ROLE
     await pool.query(
@@ -760,13 +553,86 @@ app.delete("/users/:id", authenticateToken, async (req, res) => {
       [id]
     );
 
-    // DELETE AUTH USER
-    await pool.query(
+    // DELETE AUTH
+    if (profile.auth_user_id) {
+
+      await pool.query(
+        `
+        DELETE FROM auth_users
+        WHERE id = $1
+        `,
+        [profile.auth_user_id]
+      );
+
+    }
+
+    res.json({
+      success: true,
+    });
+
+  } catch (error) {
+
+    console.error(error);
+
+    res.status(500).json({
+      error: error.message,
+    });
+
+  }
+
+});
+
+// ======================================================
+// UPDATE PASSWORD
+// ======================================================
+
+app.put("/users/:id/password", authenticateToken, async (req, res) => {
+
+  try {
+
+    const { id } = req.params;
+
+    const { password } = req.body;
+
+    if (!password) {
+
+      return res.status(400).json({
+        error: "Contraseña requerida",
+      });
+
+    }
+
+    const profileResult = await pool.query(
       `
-      DELETE FROM auth_users
+      SELECT *
+      FROM profiles
       WHERE id = $1
       `,
-      [authUserId]
+      [id]
+    );
+
+    if (profileResult.rows.length === 0) {
+
+      return res.status(404).json({
+        error: "Usuario no encontrado",
+      });
+
+    }
+
+    const profile = profileResult.rows[0];
+
+    const password_hash = await bcrypt.hash(password, 10);
+
+    await pool.query(
+      `
+      UPDATE auth_users
+      SET password_hash = $1
+      WHERE id = $2
+      `,
+      [
+        password_hash,
+        profile.auth_user_id,
+      ]
     );
 
     res.json({
@@ -780,13 +646,17 @@ app.delete("/users/:id", authenticateToken, async (req, res) => {
     res.status(500).json({
       error: error.message,
     });
+
   }
+
 });
 
 // ======================================================
-// 📋 GET REQUESTS
+// GET REQUESTS
 // ======================================================
+
 app.get("/requests", authenticateToken, async (req, res) => {
+
   try {
 
     const result = await pool.query(`
@@ -804,16 +674,20 @@ app.get("/requests", authenticateToken, async (req, res) => {
     res.status(500).json({
       error: error.message,
     });
+
   }
+
 });
 
 // ======================================================
-// ➕ CREATE REQUEST
+// CREATE REQUEST
 // ======================================================
+
 app.post("/requests", authenticateToken, async (req, res) => {
+
   try {
 
-    console.log("NEW REQUEST BODY:", req.body);
+    console.log("REQUEST BODY:", req.body);
 
     const {
       title,
@@ -823,11 +697,28 @@ app.post("/requests", authenticateToken, async (req, res) => {
       assignee_id,
     } = req.body;
 
-    // VALIDACIONES
-    if (!title || !type || !due_date) {
+    if (!title) {
+
       return res.status(400).json({
-        error: "Campos obligatorios faltantes",
+        error: "El título es obligatorio",
       });
+
+    }
+
+    if (!type) {
+
+      return res.status(400).json({
+        error: "El tipo es obligatorio",
+      });
+
+    }
+
+    if (!due_date) {
+
+      return res.status(400).json({
+        error: "La fecha límite es obligatoria",
+      });
+
     }
 
     const result = await pool.query(
@@ -836,10 +727,10 @@ app.post("/requests", authenticateToken, async (req, res) => {
         title,
         description,
         type,
+        status,
         due_date,
         created_by,
         assignee_id,
-        status,
         created_at,
         updated_at
       )
@@ -847,10 +738,10 @@ app.post("/requests", authenticateToken, async (req, res) => {
         $1,
         $2,
         $3,
+        'pending',
         $4,
         $5,
         $6,
-        'pending',
         NOW(),
         NOW()
       )
@@ -870,34 +761,40 @@ app.post("/requests", authenticateToken, async (req, res) => {
 
   } catch (error) {
 
-    console.error("CREATE REQUEST ERROR:", error);
+    console.error("ERROR CREANDO REQUEST:", error);
 
     res.status(500).json({
       error: error.message,
     });
+
   }
+
 });
 
 // ======================================================
-// 👤 ASSIGN REQUEST
+// ASSIGN REQUEST
 // ======================================================
+
 app.put("/requests/:id/assign", authenticateToken, async (req, res) => {
+
   try {
+
+    const { id } = req.params;
 
     const { assignee_id } = req.body;
-    const { id } = req.params;
 
     const result = await pool.query(
       `
       UPDATE media_requests
-      SET
-        assignee_id = $1,
-        status = 'in_progress',
-        updated_at = NOW()
+      SET assignee_id = $1,
+          updated_at = NOW()
       WHERE id = $2
       RETURNING *
       `,
-      [assignee_id, id]
+      [
+        assignee_id,
+        id,
+      ]
     );
 
     res.json(result.rows[0]);
@@ -909,28 +806,35 @@ app.put("/requests/:id/assign", authenticateToken, async (req, res) => {
     res.status(500).json({
       error: error.message,
     });
+
   }
+
 });
 
 // ======================================================
-// 🔄 UPDATE STATUS
+// UPDATE STATUS
 // ======================================================
+
 app.put("/requests/:id/status", authenticateToken, async (req, res) => {
+
   try {
+
+    const { id } = req.params;
 
     const { status } = req.body;
-    const { id } = req.params;
 
     const result = await pool.query(
       `
       UPDATE media_requests
-      SET
-        status = $1,
-        updated_at = NOW()
+      SET status = $1,
+          updated_at = NOW()
       WHERE id = $2
       RETURNING *
       `,
-      [status, id]
+      [
+        status,
+        id,
+      ]
     );
 
     res.json(result.rows[0]);
@@ -942,30 +846,34 @@ app.put("/requests/:id/status", authenticateToken, async (req, res) => {
     res.status(500).json({
       error: error.message,
     });
+
   }
+
 });
 
 // ======================================================
-// ✅ FINISH REQUEST
+// FINISH REQUEST
 // ======================================================
+
 app.put("/requests/:id/finish", authenticateToken, async (req, res) => {
+
   try {
+
+    const { id } = req.params;
 
     const {
       finish_link,
       finish_comment,
     } = req.body;
 
-    const { id } = req.params;
-
     const result = await pool.query(
       `
       UPDATE media_requests
       SET
-        status = 'finished',
         finish_link = $1,
         finish_comment = $2,
         finished_at = NOW(),
+        status = 'review',
         updated_at = NOW()
       WHERE id = $3
       RETURNING *
@@ -986,26 +894,19 @@ app.put("/requests/:id/finish", authenticateToken, async (req, res) => {
     res.status(500).json({
       error: error.message,
     });
+
   }
+
 });
 
 // ======================================================
-// ❌ GLOBAL ERRORS
+// START SERVER
 // ======================================================
-app.use((err, req, res, next) => {
 
-  console.error(err.stack);
-
-  res.status(500).json({
-    error: "Error interno del servidor",
-  });
-});
-
-// ======================================================
-// 🚀 SERVER
-// ======================================================
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 10000;
 
 app.listen(PORT, () => {
+
   console.log(`Servidor corriendo en puerto ${PORT}`);
+
 });
