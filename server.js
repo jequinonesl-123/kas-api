@@ -139,7 +139,10 @@ app.post("/auth/register", async (req, res) => {
     // CREAR USUARIO AUTH
     const authResult = await pool.query(
       `
-      INSERT INTO auth_users (email, password_hash)
+      INSERT INTO auth_users (
+        email,
+        password_hash
+      )
       VALUES ($1, $2)
       RETURNING id, email
       `,
@@ -148,8 +151,8 @@ app.post("/auth/register", async (req, res) => {
 
     const authUser = authResult.rows[0];
 
-    // CREAR PROFILE AUTOMÁTICO
-    await pool.query(
+    // CREAR PROFILE
+    const profileResult = await pool.query(
       `
       INSERT INTO profiles (
         id,
@@ -165,12 +168,32 @@ app.post("/auth/register", async (req, res) => {
         '#0096FA',
         $3
       )
+      RETURNING *
       `,
       [
         email.split("@")[0],
         email.split("@")[0],
         authUser.id,
       ]
+    );
+
+    const profile = profileResult.rows[0];
+
+    // CREAR ROL POR DEFECTO
+    await pool.query(
+      `
+      INSERT INTO user_roles (
+        id,
+        user_id,
+        role
+      )
+      VALUES (
+        gen_random_uuid(),
+        $1,
+        'designer'
+      )
+      `,
+      [profile.id]
     );
 
     // TOKEN
@@ -187,7 +210,10 @@ app.post("/auth/register", async (req, res) => {
     res.json({
       success: true,
       token,
-      user: authUser,
+      user: {
+        id: authUser.id,
+        email: authUser.email,
+      },
     });
 
   } catch (error) {
@@ -214,17 +240,20 @@ app.post("/auth/login", async (req, res) => {
     // BUSCAR USUARIO
     const result = await pool.query(
       `
-      SELECT 
+      SELECT
         au.id,
         au.email,
         au.password_hash,
+        p.id as profile_id,
         p.name,
         p.username,
         p.avatar_color,
-        p.id as profile_id
+        ur.role
       FROM auth_users au
       LEFT JOIN profiles p
         ON p.auth_user_id = au.id
+      LEFT JOIN user_roles ur
+        ON ur.user_id = p.id
       WHERE au.email = $1
       `,
       [email]
@@ -251,7 +280,7 @@ app.post("/auth/login", async (req, res) => {
       });
     }
 
-    // GENERAR TOKEN
+    // TOKEN
     const token = jwt.sign(
       {
         userId: user.id,
@@ -262,7 +291,7 @@ app.post("/auth/login", async (req, res) => {
       }
     );
 
-    // RESPUESTA
+    // RESPONSE
     res.json({
       success: true,
       token,
@@ -273,6 +302,7 @@ app.post("/auth/login", async (req, res) => {
         name: user.name,
         username: user.username,
         avatar_color: user.avatar_color,
+        role: user.role,
       },
     });
 
@@ -284,21 +314,26 @@ app.post("/auth/login", async (req, res) => {
 });
 
 // =====================
-// 👤 USER PROFILE
+// 👤 CURRENT USER
 // =====================
 app.get("/me", authenticateToken, async (req, res) => {
   try {
+
     const result = await pool.query(
       `
-      SELECT 
+      SELECT
         au.id,
         au.email,
+        p.id as profile_id,
         p.name,
         p.username,
-        p.avatar_color
+        p.avatar_color,
+        ur.role
       FROM auth_users au
       LEFT JOIN profiles p
         ON p.auth_user_id = au.id
+      LEFT JOIN user_roles ur
+        ON ur.user_id = p.id
       WHERE au.id = $1
       `,
       [req.user.userId]
@@ -314,10 +349,43 @@ app.get("/me", authenticateToken, async (req, res) => {
 });
 
 // =====================
+// 👥 GET USERS
+// =====================
+app.get("/users", authenticateToken, async (req, res) => {
+  try {
+
+    const result = await pool.query(`
+      SELECT
+        p.id,
+        p.name,
+        p.username,
+        p.avatar_color,
+        p.auth_user_id,
+        au.email,
+        ur.role
+      FROM profiles p
+      LEFT JOIN auth_users au
+        ON au.id = p.auth_user_id
+      LEFT JOIN user_roles ur
+        ON ur.user_id = p.id
+      ORDER BY p.name ASC
+    `);
+
+    res.json(result.rows);
+
+  } catch (error) {
+    res.status(500).json({
+      error: error.message,
+    });
+  }
+});
+
+// =====================
 // 📋 GET REQUESTS
 // =====================
 app.get("/requests", authenticateToken, async (req, res) => {
   try {
+
     const result = await pool.query(`
       SELECT *
       FROM media_requests
@@ -338,6 +406,7 @@ app.get("/requests", authenticateToken, async (req, res) => {
 // =====================
 app.post("/requests", authenticateToken, async (req, res) => {
   try {
+
     const {
       title,
       description,
@@ -387,6 +456,7 @@ app.post("/requests", authenticateToken, async (req, res) => {
 // =====================
 app.put("/requests/:id/assign", authenticateToken, async (req, res) => {
   try {
+
     const { assignee_id } = req.body;
     const { id } = req.params;
 
@@ -417,6 +487,7 @@ app.put("/requests/:id/assign", authenticateToken, async (req, res) => {
 // =====================
 app.put("/requests/:id/status", authenticateToken, async (req, res) => {
   try {
+
     const { status } = req.body;
     const { id } = req.params;
 
@@ -446,6 +517,7 @@ app.put("/requests/:id/status", authenticateToken, async (req, res) => {
 // =====================
 app.put("/requests/:id/finish", authenticateToken, async (req, res) => {
   try {
+
     const {
       finish_link,
       finish_comment,
