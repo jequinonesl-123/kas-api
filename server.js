@@ -978,3 +978,70 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Servidor corriendo en puerto ${PORT}`);
 });
+app.post("/requests", authenticateToken, async (req, res) => {
+  try {
+
+    console.log("BODY:", req.body);
+
+    const {
+      title,
+      description,
+      type,
+      due_date,
+      assignee_id,
+    } = req.body;
+
+    // VALIDACIÓN
+    if (!title || !type || !due_date) {
+      return res.status(400).json({
+        error: "Faltan campos obligatorios",
+      });
+    }
+
+    const result = await pool.query(
+      `
+      INSERT INTO media_requests (
+        title,
+        description,
+        type,
+        due_date,
+        created_by,
+        assignee_id,
+        status,
+        created_at,
+        updated_at
+      )
+      VALUES (
+        $1,
+        $2,
+        $3,
+        $4,
+        $5,
+        $6,
+        'pending',
+        NOW(),
+        NOW()
+      )
+      RETURNING *
+      `,
+      [
+        title,
+        description || "",
+        type,
+        due_date,
+        req.user.userId,
+        assignee_id || null,
+      ]
+    );
+
+    res.json(result.rows[0]);
+
+  } catch (error) {
+
+    console.error("CREATE REQUEST ERROR:", error);
+
+    res.status(500).json({
+      error: error.message,
+    });
+  }
+});
